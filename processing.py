@@ -119,10 +119,12 @@ def upload_parquet_to_storage(bucket_name: str, remote_file_path: str, data: pd.
         buffer = io.BytesIO()
         data.to_parquet(buffer, engine='pyarrow')
         parquet_bytes = buffer.getvalue()
+    # In processing.py, inside upload_parquet_to_storage function
+
     result = supabase.storage.from_(bucket_name).upload(
         path=remote_file_path,
         file=parquet_bytes,
-        file_options={"content-type": "application/octet-stream", "upsert": True}
+        file_options={"content-type": "application/octet-stream", "upsert": "true"} # Changed True to "true"
     )
     if isinstance(result, dict) and result.get('error'):
         raise RuntimeError(result['error'])
