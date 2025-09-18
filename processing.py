@@ -119,30 +119,55 @@ def upload_parquet_to_storage(bucket_name: str, remote_file_path: str, data: pd.
         buffer = io.BytesIO()
         data.to_parquet(buffer, engine='pyarrow')
         parquet_bytes = buffer.getvalue()
-    # In processing.py, inside upload_parquet_to_storage function
-
     result = supabase.storage.from_(bucket_name).upload(
         path=remote_file_path,
         file=parquet_bytes,
-        file_options={"content-type": "application/octet-stream", "upsert": "true"} # Changed True to "true"
+        file_options={"content-type": "application/octet-stream", "upsert": "true"}
     )
     if isinstance(result, dict) and result.get('error'):
         raise RuntimeError(result['error'])
     return result
 
-def update_metadata_in_db(original_filename: str, processed_file_location: str, status: str, file_type: str, metadata_payload: dict):
-    """Inserts a record with rich metadata into the 'file_metadata' table."""
+def update_metadata_in_db(original_filename: str, processed_file_location: str, status: str, file_type: str, metadata_payload: dict, geom: str | None):
+    """Inserts a record with rich metadata and geometry into the 'file_metadata' table."""
     new_row = {
         'original_filename': original_filename,
         'processed_file_location': processed_file_location,
         'status': status,
         'file_type': file_type,
-        'metadata_payload': metadata_payload
+        'metadata_payload': metadata_payload,
+        'geom': geom
     }
     response = supabase.table('file_metadata').insert(new_row).execute()
     if getattr(response, 'error', None):
         raise RuntimeError(str(response.error))
     return response
+
+def create_bounding_box(df: pd.DataFrame) -> str | None:
+    """
+    Creates a WKT POLYGON representation of the data's bounding box.
+    Returns None if coordinate columns are not found or data is invalid.
+    """
+    lat_col, lon_col = None, None
+    for col in df.columns:
+        if 'lat' in str(col).lower():
+            lat_col = col
+        if 'lon' in str(col).lower() or 'lng' in str(col).lower():
+            lon_col = col
+
+    if not (lat_col and lon_col):
+        return None
+
+    # Drop rows with invalid coordinate data before calculating min/max
+    df_coords = df.dropna(subset=[lat_col, lon_col])
+    if df_coords.empty:
+        return None
+
+    min_lon, max_lon = df_coords[lon_col].min(), df_coords[lon_col].max()
+    min_lat, max_lat = df_coords[lat_col].min(), df_coords[lat_col].max()
+
+    wkt_bbox = f"POLYGON(({min_lon} {min_lat}, {max_lon} {min_lat}, {max_lon} {max_lat}, {min_lon} {max_lat}, {min_lon} {min_lat}))"
+    return wkt_bbox
 
 def run_ingestion_pipeline(filename: str):
     """Orchestrates the entire file ingestion process."""
@@ -164,6 +189,9 @@ def run_ingestion_pipeline(filename: str):
         else:
             raise ValueError(f"Unsupported file type: {filename}")
 
+        # Create a bounding box from the processed data
+        geom_wkt = create_bounding_box(cleaned_df)
+        
         cleaned_df = _sanitize_dataframe_for_parquet(cleaned_df)
         
         print(f"Uploading {processed_filename}...")
@@ -175,7 +203,8 @@ def run_ingestion_pipeline(filename: str):
             processed_file_location=processed_filename,
             status='processed',
             file_type=file_type,
-            metadata_payload=metadata_payload
+            metadata_payload=metadata_payload,
+            geom=geom_wkt
         )
         print("Pipeline completed successfully!")
         return {"status": "success", "processed_file": processed_filename}
